@@ -7,9 +7,13 @@ import aiosqlite
 import random
 import subprocess
 from datetime import datetime, timezone, timedelta
+import time
 
 # --- KONFIGURACJA ---
-DAEMON_MODE = True  # Tryb pętli na czas działania GitHub Actions (max 6h)
+DAEMON_MODE = True  # Tryb pętli na czas działania GitHub Actions
+AUTO_EXIT_BEFORE_LIMIT = True  # True = bezpieczne wyjście przed upływem limitu 6h
+MAX_RUN_TIME_SECONDS = (5 * 3600) + (58 * 60)  # 5 godzin i 58 minut
+
 TZ_POLAND = timezone(timedelta(hours=2))  # UTC+2 (czas polski)
 
 URL_ZASTEPSTWA = "https://broniewski.edu.pl/index.php/zmiany-w-planie"
@@ -39,7 +43,7 @@ def get_target_date_text() -> str:
     if (weekday == 4 and hour >= 12) or weekday >= 5:
         days_until_monday = (7 - weekday) % 7
         if days_until_monday == 0:
-            days_until_monday = 7  # Gdyby wywołać w poniedziałek, ale ten warunek wyklucza
+            days_until_monday = 7
         target_date = now + timedelta(days=days_until_monday)
     # Dni powszednie po 12:00 -> jutro
     elif hour >= 12:
@@ -145,8 +149,6 @@ async def check_zastepstwa():
             return
 
         html = response.text
-
-        # Wyznaczenie daty z wykorzystaniem logiki zegara w Pythonie
         date_text = get_target_date_text()
 
         image_matches = re.findall(r'src=["\'](/images/[a-zA-Z0-9_-]+\.png)["\']', html)
@@ -158,7 +160,6 @@ async def check_zastepstwa():
         full_image_urls = [BASE_URL + img if img.startswith("/") else BASE_URL + "/" + img for img in image_matches]
         primary_image_url = full_image_urls[0]
 
-        # Pobieranie obrazków z próbami ponowienia (Retry x3)
         images_bytes_list = []
         for img_url in full_image_urls:
             success = False
@@ -199,7 +200,19 @@ async def check_zastepstwa():
 async def main():
     if DAEMON_MODE:
         print("[*] Uruchamianie w trybie DAEMON na GitHub Actions...")
+        start_time = time.time()
+        
         while True:
+            # Sprawdzenie wewnętrznego timera przed upływem limitu 6h
+            if AUTO_EXIT_BEFORE_LIMIT:
+                elapsed_time = time.time() - start_time
+                if elapsed_time >= MAX_RUN_TIME_SECONDS:
+                    print("[*] Zbliża się limit 6h na GitHub Actions. Bezpieczne wyłączanie skryptu...")
+                    # Ostatni wymuszony zapis/commit stanu na wszelki wypadek
+                    commit_db_to_github()
+                    print("[*] Skrypt zakończył pracę poprawnie przed upływem czasu.")
+                    break
+
             sleep_time = 300
             try:
                 now_pl = datetime.now(TZ_POLAND)
