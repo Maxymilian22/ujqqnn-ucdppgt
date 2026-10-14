@@ -29,26 +29,17 @@ HEADERS = {
 }
 
 def get_target_date_text() -> str:
-    """
-    Wyznacza datę docelową zastępstw w języku polskim:
-    - Piątek po 12:00, Sobota, Niedziela -> Data najbliższego Poniedziałku
-    - Po godz. 12:00 (Pn-Czw) -> Data jutrzejsza
-    - Przed godz. 12:00 (Pn-Pt) -> Data dzisiejsza
-    """
     now = datetime.now(TZ_POLAND)
-    weekday = now.weekday()  # 0=Pon, 1=Wt, ..., 4=Pt, 5=Sob, 6=Niedz
+    weekday = now.weekday()  
     hour = now.hour
 
-    # Okno weekendowe: od Piątku 12:00 do końca Niedzieli
     if (weekday == 4 and hour >= 12) or weekday >= 5:
         days_until_monday = (7 - weekday) % 7
         if days_until_monday == 0:
             days_until_monday = 7
         target_date = now + timedelta(days=days_until_monday)
-    # Dni powszednie po 12:00 -> jutro
     elif hour >= 12:
         target_date = now + timedelta(days=1)
-    # Przed 12:00 -> dzisiaj
     else:
         target_date = now
 
@@ -59,7 +50,6 @@ def get_target_date_text() -> str:
     return f"{day_name}, {formatted_date}"
 
 def commit_db_to_github():
-    """Wysyła zaktualizowany plik bazy danych z powrotem do repozytorium GitHub z autoryzacją."""
     token = os.getenv("GITHUB_TOKEN")
     repo_url = os.getenv("GITHUB_REPOSITORY")
     
@@ -203,12 +193,10 @@ async def main():
         start_time = time.time()
         
         while True:
-            # Sprawdzenie wewnętrznego timera przed upływem limitu 6h
             if AUTO_EXIT_BEFORE_LIMIT:
                 elapsed_time = time.time() - start_time
                 if elapsed_time >= MAX_RUN_TIME_SECONDS:
                     print("[*] Zbliża się limit 6h na GitHub Actions. Bezpieczne wyłączanie skryptu...")
-                    # Ostatni wymuszony zapis/commit stanu na wszelki wypadek
                     commit_db_to_github()
                     print("[*] Skrypt zakończył pracę poprawnie przed upływem czasu.")
                     break
@@ -230,13 +218,13 @@ async def main():
                     await check_zastepstwa()
                     
                     if is_weekend:
-                        sleep_time = random.randint(840, 960)  # 14-16 min
+                        sleep_time = random.randint(840, 960)
                         print(f"[*] [{now_pl.strftime('%H:%M')}] Weekend. Kolejny skan za {sleep_time // 60} min.")
                     elif is_slow_window:
-                        sleep_time = random.randint(300, 480)    # 5-8 min
+                        sleep_time = random.randint(300, 480)
                         print(f"[*] [{now_pl.strftime('%H:%M')}] Okno 10-12. Kolejny skan za {sleep_time // 60} min.")
                     else:
-                        sleep_time = random.randint(120, 180)    # 2-3 min
+                        sleep_time = random.randint(120, 180)
                         print(f"[*] [{now_pl.strftime('%H:%M')}] Standardowy skan. Kolejny skan za {sleep_time // 60} min.")
 
             except Exception as e:
