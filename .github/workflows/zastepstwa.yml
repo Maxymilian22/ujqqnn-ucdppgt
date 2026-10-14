@@ -1,29 +1,36 @@
-name: Zastepstwa Bot
+name: Skaner Zastępstw
 
 on:
-  workflow_dispatch: # Pozwala na ręczne odpalenie z telefonu/przeglądarki
+  schedule:
+    - cron: '0 */5 * * *' # Lub inny harmonogram uruchamiania
+  workflow_dispatch:
 
 jobs:
-  run-bot:
+  run-skaner:
     runs-on: ubuntu-latest
+    
+    # 1. WYMAGANE: Uprawnienia do zapisu w repozytorium przez GITHUB_TOKEN
     permissions:
-      contents: write # Dostęp do zapisywania zaktualizowanej bazy danych w repozytorium
+      contents: write
 
     steps:
-      - name: Pobierz najnowszy kod i stan bazy
+      - name: Pobierz kod repozytorium
         uses: actions/checkout@v4
 
       - name: Konfiguracja Pythona
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip'
 
-      - name: Instalacja wymaganych pakietów
+      - name: Instalacja zależności
         run: |
-          pip install httpx "httpx[http2]" aiosqlite
+          pip install httpx aiosqlite
 
-      - name: Uruchomienie skanera
+      - name: Uruchomienie skryptu zastępstw
+        # 2. WYMAGANE: Przekazanie tokenu i nazwy repozytorium do skryptu
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           DISCORD_WEBHOOK_URL_2: ${{ secrets.DISCORD_WEBHOOK_URL_2 }}
-        run: |
-          python zastepstwa_bot.py
+        run: python zastepstwa_bot.py
