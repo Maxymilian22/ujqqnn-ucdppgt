@@ -90,27 +90,26 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                images_urls TEXT,
-                images_hash TEXT
+                primary_image TEXT,
+                image_hash TEXT
             )
         """)
         await db.commit()
 
 async def get_saved_state():
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT images_urls, images_hash FROM state WHERE id = 1") as cursor:
+        async with db.execute("SELECT primary_image, image_hash FROM state WHERE id = 1") as cursor:
             row = await cursor.fetchone()
             if row:
-                return {"images_urls": row[0], "images_hash": row[1]}
+                return {"primary_image": row[0], "image_hash": row[1]}
     return None
 
-async def save_state(images_urls, images_hash):
-    urls_str = ",".join(images_urls)
+async def save_state(primary_image, image_hash):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
-            INSERT OR REPLACE INTO state (id, images_urls, images_hash)
+            INSERT OR REPLACE INTO state (id, primary_image, image_hash)
             VALUES (1, ?, ?)
-        """, (urls_str, images_hash))
+        """, (primary_image, image_hash))
         await db.commit()
     commit_db_to_github()
 
@@ -139,11 +138,9 @@ async def send_discord_alert(image_urls, images_bytes_list, date_text):
 async def check_zastepstwa():
     await init_db()
 
-    cache_buster_url = f"{URL_ZASTEPSTWA}?t={int(time.time())}"
-
     async with httpx.AsyncClient(http2=True, headers=HEADERS, follow_redirects=True) as client:
         try:
-            response = await client.get(cache_buster_url, timeout=10.0)
+            response = await client.get(URL_ZASTEPSTWA, timeout=10.0)
             if response.status_code != 200:
                 print(f"[!] Nie udało się pobrać strony (Kod: {response.status_code})")
                 return
@@ -154,21 +151,21 @@ async def check_zastepstwa():
         html = response.text
         date_text = get_target_date_text()
 
-        image_matches = re.findall(r'src=["\'](/images/[^"\']+\.png)["\']', html)
+        image_matches = re.findall(r'src=["\'](/images/[a-zA-Z0-9_-]+\.png)["\']', html)
         
         if not image_matches:
             print("[*] Nie znaleziono obrazków zastępstw w kodzie HTML.")
             return
 
         full_image_urls = [BASE_URL + img if img.startswith("/") else BASE_URL + "/" + img for img in image_matches]
-        print(f"[*] Wykryte adresy obrazków ({len(full_image_urls)}): {full_image_urls}")
+        primary_image_url = full_image_urls[0]
 
         images_bytes_list = []
         for img_url in full_image_urls:
             success = False
             for attempt in range(3):
                 try:
-                    img_res = await client.get(f"{img_url}?t={int(time.time())}", timeout=10.0)
+                    img_res = await client.get(img_url, timeout=10.0)
                     if img_res.status_code == 200:
                         images_bytes_list.append(img_res.content)
                         success = True
@@ -181,30 +178,24 @@ async def check_zastepstwa():
                 print(f"[!] Ostrzeżenie: Nie udało się pobrać obrazka po 3 próbach: {img_url}")
 
         if not images_bytes_list:
-            print("[!] Не udało się pobrać żadnej grafiki zastępstw.")
+            print("[!] Nie udało się pobrać żadnej grafiki zastępstw.")
             return
 
-        # Tworzymy zbiorczy hasz ze wszystkich pobranych obrazków po kolei
-        hasher = hashlib.md5()
-        for img_bytes in images_bytes_list:
-            hasher.update(img_bytes)
-        current_combined_hash = hasher.hexdigest()
-        
-        current_urls_str = ",".join(full_image_urls)
-        print(f"[*] Obliczony zbiorczy MD5 obrazków: {current_combined_hash}")
+        primary_image_bytes = images_bytes_list[0]
+        current_hash = hashlib.md5(primary_image_bytes).hexdigest()
 
         saved_state = await get_saved_state()
 
         if saved_state is None:
-            print(f"[*] Pierwsze uruchomienie. Zapisywanie stanu dla {len(full_image_urls)} obrazków.")
-            await save_state(full_image_urls, current_combined_hash)
+            print(f"[*] Pierwsze uruchomienie. Wykryto obrazek: {primary_image_url}")
+            await save_state(primary_image_url, current_hash)
             await send_discord_alert(full_image_urls, images_bytes_list, date_text)
-        elif saved_state["images_urls"] != current_urls_str or saved_state["images_hash"] != current_combined_hash:
-            print(f"[!] ZMIANA ZASTĘPSTW WYKRYTA! Zmieniono adresy URL lub zawartość któregoś z obrazków.")
-            await save_state(full_image_urls, current_combined_hash)
+        elif saved_state["primary_image"] != primary_image_url or saved_state["image_hash"] != current_hash:
+            print(f"[!] ZMIANA ZASTĘPSTW! Nowy plik: {primary_image_url}")
+            await save_state(primary_image_url, current_hash)
             await send_discord_alert(full_image_urls, images_bytes_list, date_text)
         else:
-            print("[*] Brak zmian w zastępstwach (wszystkie obrazki i ich hasze są identyczne jak w bazie).")
+            print("[*] Brak zmian w zastępstwach.")
 
 async def main():
     if DAEMON_MODE:
@@ -212,10 +203,12 @@ async def main():
         start_time = time.time()
         
         while True:
+            # Sprawdzenie wewnętrznego timera przed upływem limitu 6h
             if AUTO_EXIT_BEFORE_LIMIT:
                 elapsed_time = time.time() - start_time
                 if elapsed_time >= MAX_RUN_TIME_SECONDS:
                     print("[*] Zbliża się limit 6h na GitHub Actions. Bezpieczne wyłączanie skryptu...")
+                    # Ostatni wymuszony zapis/commit stanu na wszelki wypadek
                     commit_db_to_github()
                     print("[*] Skrypt zakończył pracę poprawnie przed upływem czasu.")
                     break
