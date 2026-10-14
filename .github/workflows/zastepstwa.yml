@@ -1,15 +1,14 @@
 name: Skaner Zastępstw
 
 on:
-  schedule:
-    - cron: '0 */5 * * *' # Lub inny harmonogram uruchamiania
+#  schedule:
+#    - cron: '0 */5 * * *'
   workflow_dispatch:
 
 jobs:
   run-skaner:
     runs-on: ubuntu-latest
     
-    # 1. WYMAGANE: Uprawnienia do zapisu w repozytorium przez GITHUB_TOKEN
     permissions:
       contents: write
 
@@ -28,10 +27,9 @@ jobs:
 
       - name: Instalacja zależności
         run: |
-          pip install httpx aiosqlite
+          pip install httpx "httpx[http2]" aiosqlite
 
       - name: Uruchomienie skryptu zastępstw
-        # 2. WYMAGANE: Przekazanie tokenu i nazwy repozytorium do skryptu
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
