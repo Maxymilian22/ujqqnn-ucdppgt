@@ -30,10 +30,7 @@ HEADERS = {
 
 def get_target_date_text() -> str:
     """
-    Wyznacza datę docelową zastępstw w języku polskim:
-    - Piątek po 12:00, Sobota, Niedziela -> Data najbliższego Poniedziałku
-    - Po godz. 12:00 (Pn-Czw) -> Data jutrzejsza
-    - Przed godz. 12:00 (Pn-Pt) -> Data dzisiejsza
+    AWARYJNA METODA: Wyznacza datę docelową na podstawie dnia i godziny.
     """
     now = datetime.now(TZ_POLAND)
     weekday = now.weekday()  # 0=Pon, 1=Wt, ..., 4=Pt, 5=Sob, 6=Niedz
@@ -71,7 +68,6 @@ def commit_db_to_github():
         auth_url = f"https://x-access-token:{token}@github.com/{repo_url}.git"
         subprocess.run(["git", "remote", "set-url", "origin", auth_url], check=True)
 
-        # Upewniamy się, że operujemy na aktualnej gałęzi (np. main)
         subprocess.run(["git", "fetch", "origin"], check=True)
         subprocess.run(["git", "checkout", "main"], capture_output=True)
 
@@ -139,7 +135,6 @@ async def send_discord_alert(image_urls, images_bytes_list, date_text):
 async def check_zastepstwa():
     await init_db()
 
-    # Anti-cache dla strony głównej
     cache_buster_url = f"{URL_ZASTEPSTWA}?t={int(time.time())}"
 
     async with httpx.AsyncClient(http2=True, headers=HEADERS, follow_redirects=True) as client:
@@ -153,7 +148,22 @@ async def check_zastepstwa():
             return
 
         html = response.text
-        date_text = get_target_date_text()
+
+        # NOWOŚĆ: Próba wyciągnięcia daty bezpośrednio z kodu strony (np. "19.10.2026")
+        date_match = re.search(r'\b(\d{2}\.\d{2}\.\d{4})\b', html)
+        if date_match:
+            extracted_date_str = date_match.group(1)
+            try:
+                dt = datetime.strptime(extracted_date_str, "%d.%m.%Y")
+                days_pol = ["poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela"]
+                day_name = days_pol[dt.weekday()]
+                date_text = f"{day_name}, {extracted_date_str}"
+            except ValueError:
+                # Awaryjnie w razie błędnego parsowania
+                date_text = get_target_date_text()
+        else:
+            # Fallback: jeśli nie znaleziono daty w HTML, używamy starej metody opartej na czasie
+            date_text = get_target_date_text()
 
         # ELASTYCZNY REGEX: Obsługuje dowolne nazwy plików PNG w katalogu /images/
         image_matches = re.findall(r'src=["\'](/images/[^"\']+\.png)["\']', html)
@@ -170,7 +180,6 @@ async def check_zastepstwa():
             success = False
             for attempt in range(3):
                 try:
-                    # ANTI-CACHE dla pobieranego obrazka (zapobiega serwowaniu starego pliku przez cache serwera)
                     img_cache_url = f"{img_url}?t={int(time.time())}"
                     img_res = await client.get(img_cache_url, timeout=10.0)
                     if img_res.status_code == 200:
@@ -210,7 +219,6 @@ async def main():
         start_time = time.time()
         
         while True:
-            # Sprawdzenie wewnętrznego timera przed upływem limitu 6h (bezpieczny timeout)
             if AUTO_EXIT_BEFORE_LIMIT:
                 elapsed_time = time.time() - start_time
                 if elapsed_time >= MAX_RUN_TIME_SECONDS:
