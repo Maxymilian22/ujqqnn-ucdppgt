@@ -29,8 +29,14 @@ HEADERS = {
 }
 
 def get_target_date_text() -> str:
+    """
+    Wyznacza datę docelową zastępstw w języku polskim:
+    - Piątek po 12:00, Sobota, Niedziela -> Data najbliższego Poniedziałku
+    - Po godz. 12:00 (Pn-Czw) -> Data jutrzejsza
+    - Przed godz. 12:00 (Pn-Pt) -> Data dzisiejsza
+    """
     now = datetime.now(TZ_POLAND)
-    weekday = now.weekday()  
+    weekday = now.weekday()  # 0=Pon, 1=Wt, ..., 4=Pt, 5=Sob, 6=Niedz
     hour = now.hour
 
     if (weekday == 4 and hour >= 12) or weekday >= 5:
@@ -50,6 +56,7 @@ def get_target_date_text() -> str:
     return f"{day_name}, {formatted_date}"
 
 def commit_db_to_github():
+    """Wysyła zaktualizowany plik bazy danych z powrotem do repozytorium GitHub na gałąź main."""
     token = os.getenv("GITHUB_TOKEN")
     repo_url = os.getenv("GITHUB_REPOSITORY")
     
@@ -64,11 +71,15 @@ def commit_db_to_github():
         auth_url = f"https://x-access-token:{token}@github.com/{repo_url}.git"
         subprocess.run(["git", "remote", "set-url", "origin", auth_url], check=True)
 
-        subprocess.run(["git", "add", "zastepstwa_state.db"], check=True)
+        # Upewniamy się, że operujemy na aktualnej gałęzi (np. main)
+        subprocess.run(["git", "fetch", "origin"], check=True)
+        subprocess.run(["git", "checkout", "main"], capture_output=True)
+
+        subprocess.run(["git", "add", DB_FILE], check=True)
         
         result = subprocess.run(["git", "commit", "-m", "Auto-update stanu bazy danych [skip ci]"], capture_output=True, text=True)
         if "nothing to commit" not in result.stdout:
-            subprocess.run(["git", "push"], check=True)
+            subprocess.run(["git", "push", "origin", "main"], check=True)
             print("[+] Zapisano i wysłano stan bazy danych do repozytorium GitHub.")
         else:
             print("[*] Brak nowych zmian w bazie danych do wysłania.")
@@ -128,9 +139,12 @@ async def send_discord_alert(image_urls, images_bytes_list, date_text):
 async def check_zastepstwa():
     await init_db()
 
+    # Anti-cache dla strony głównej
+    cache_buster_url = f"{URL_ZASTEPSTWA}?t={int(time.time())}"
+
     async with httpx.AsyncClient(http2=True, headers=HEADERS, follow_redirects=True) as client:
         try:
-            response = await client.get(URL_ZASTEPSTWA, timeout=10.0)
+            response = await client.get(cache_buster_url, timeout=10.0)
             if response.status_code != 200:
                 print(f"[!] Nie udało się pobrać strony (Kod: {response.status_code})")
                 return
@@ -141,7 +155,8 @@ async def check_zastepstwa():
         html = response.text
         date_text = get_target_date_text()
 
-        image_matches = re.findall(r'src=["\'](/images/[a-zA-Z0-9_-]+\.png)["\']', html)
+        # ELASTYCZNY REGEX: Obsługuje dowolne nazwy plików PNG w katalogu /images/
+        image_matches = re.findall(r'src=["\'](/images/[^"\']+\.png)["\']', html)
         
         if not image_matches:
             print("[*] Nie znaleziono obrazków zastępstw w kodzie HTML.")
@@ -155,7 +170,9 @@ async def check_zastepstwa():
             success = False
             for attempt in range(3):
                 try:
-                    img_res = await client.get(img_url, timeout=10.0)
+                    # ANTI-CACHE dla pobieranego obrazka (zapobiega serwowaniu starego pliku przez cache serwera)
+                    img_cache_url = f"{img_url}?t={int(time.time())}"
+                    img_res = await client.get(img_cache_url, timeout=10.0)
                     if img_res.status_code == 200:
                         images_bytes_list.append(img_res.content)
                         success = True
@@ -193,6 +210,7 @@ async def main():
         start_time = time.time()
         
         while True:
+            # Sprawdzenie wewnętrznego timera przed upływem limitu 6h (bezpieczny timeout)
             if AUTO_EXIT_BEFORE_LIMIT:
                 elapsed_time = time.time() - start_time
                 if elapsed_time >= MAX_RUN_TIME_SECONDS:
