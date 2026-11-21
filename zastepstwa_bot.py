@@ -196,12 +196,15 @@ async def send_discord_alert(image_urls, images_bytes_list, date_text):
 
 async def check_zastepstwa():
     await init_db()
+    print(f"[DEBUG] Ścieżka bazy DB: {DB_FILE}, czy istnieje przed skanem: {os.path.exists(DB_FILE)}")
 
     cache_buster_url = f"{URL_ZASTEPSTWA}?t={int(time.time())}"
+    print(f"[DEBUG] Pobieram URL: {cache_buster_url}")
 
     async with httpx.AsyncClient(http2=True, headers=HEADERS, follow_redirects=True) as client:
         try:
             response = await client.get(cache_buster_url, timeout=10.0)
+            print(f"[DEBUG] Status HTTP: {response.status_code}, długość HTML: {len(response.text)}, końcowy URL: {response.url}")
             if response.status_code != 200:
                 print(f"[!] Nie udało się pobrać strony (Kod: {response.status_code})")
                 return
@@ -212,9 +215,11 @@ async def check_zastepstwa():
         html = response.text
         date_text = get_target_date_text()
         saved_state = await get_saved_state()
+        print(f"[DEBUG] Wyznaczona data: '{date_text}' | saved_state: {saved_state}")
 
         # 1. Najpierw szukamy obrazków tak jak wcześniej
         image_matches = re.findall(r'src=["\'](/images/[^"\']+\.png)["\']', html)
+        print(f"[DEBUG] Dopasowane obrazki .png ({len(image_matches)}): {image_matches}")
 
         if image_matches:
             full_image_urls = [BASE_URL + img if img.startswith("/") else BASE_URL + "/" + img for img in image_matches]
@@ -264,12 +269,18 @@ async def check_zastepstwa():
         # 2. Brak obrazków -> sprawdzamy aktualizację treści podstrony (hash) oraz lekcje 1..8
         print("[*] Nie znaleziono obrazków zastępstw w kodzie HTML. Przechodzę do weryfikacji tekstowej...")
         normalized_text, current_text_hash = extract_text_section_and_hash(html)
-        print(f"[*] Obliczony SHA-256 treści zastępstw: {current_text_hash}")
+        lessons = find_lessons_1_to_8(html, normalized_text)
+        saved_text_hash = saved_state["text_hash"] if saved_state else None
+
+        print(f"[DEBUG] Długość znormalizowanego tekstu: {len(normalized_text)}")
+        print(f"[DEBUG] Podgląd tekstu (300 zn.): {normalized_text[:300]}")
+        print(f"[DEBUG] Hash zapisany w DB: {saved_text_hash}")
+        print(f"[DEBUG] Hash aktualny SHA-256: {current_text_hash}")
+        print(f"[DEBUG] Dopasowane lekcje 1-8 ({len(lessons)}): {lessons}")
 
         if saved_state is None:
             print("[*] Pierwsze uruchomienie (brak obrazków). Zapisywanie początkowego hasha treści.")
             await save_state([], "", text_hash=current_text_hash)
-            lessons = find_lessons_1_to_8(html, normalized_text)
             if lessons:
                 print(f"[!] Wykryto wpisy lekcji 1-8 przy pierwszym uruchomieniu: {lessons}")
                 await send_discord_alert([], [], date_text)
@@ -279,7 +290,6 @@ async def check_zastepstwa():
 
         if saved_state["text_hash"] != current_text_hash:
             print("[!] Wykryto aktualizację treści podstrony (zmiana hasha SHA-256).")
-            lessons = find_lessons_1_to_8(html, normalized_text)
             await save_state([], "", text_hash=current_text_hash)
 
             if lessons:
