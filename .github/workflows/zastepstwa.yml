@@ -8,7 +8,7 @@ on:
 jobs:
   run-skaner:
     runs-on: ubuntu-latest
-    
+
     permissions:
       contents: write
 
@@ -27,7 +27,7 @@ jobs:
 
       - name: Instalacja zależności
         run: |
-          pip install httpx "httpx[http2]" aiosqlite
+          pip install httpx "httpx[http2]" aiosqlite beautifulsoup4
 
       - name: Uruchomienie skryptu zastępstw
         env:
