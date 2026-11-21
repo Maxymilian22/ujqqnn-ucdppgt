@@ -110,8 +110,13 @@ async def init_db():
         """)
         async with db.execute("PRAGMA table_info(state)") as cursor:
             columns = [row[1] for row in await cursor.fetchall()]
-        if "text_hash" not in columns:
-            await db.execute("ALTER TABLE state ADD COLUMN text_hash TEXT")
+        for col_name, col_type in [
+            ("images_urls", "TEXT"),
+            ("images_hash", "TEXT"),
+            ("text_hash", "TEXT"),
+        ]:
+            if col_name not in columns:
+                await db.execute(f"ALTER TABLE state ADD COLUMN {col_name} {col_type}")
         await db.commit()
 
 
