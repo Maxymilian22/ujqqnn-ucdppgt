@@ -15,7 +15,7 @@ DAEMON_MODE = True  # Tryb pętli na czas działania GitHub Actions
 AUTO_EXIT_BEFORE_LIMIT = True  # True = bezpieczne wyjście przed upływem limitu 6h
 MAX_RUN_TIME_SECONDS = (5 * 3600) + (58 * 60)  # 5 godzin i 58 minut
 
-TZ_POLAND = timezone(timedelta(hours=2))  # UTC+2 (czas polski)
+TZ_POLAND = ZoneInfo("Europe/Warsaw")
 
 URL_ZASTEPSTWA = "https://broniewski.edu.pl/index.php/zmiany-w-planie"
 BASE_URL = "https://broniewski.edu.pl"
@@ -24,6 +24,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "zastepstwa_state.db")
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL_2")
+
+TARGET_SUBSTRING = "2m"
+DISCORD_MAX_LEN = 1900
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -147,6 +150,103 @@ async def save_state(images_urls, images_hash, text_hash=None):
     commit_db_to_github()
 
 
+def _clean_cell(text: str) -> str:
+    cleaned = text.replace("\xa0", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned if cleaned else "—"
+
+
+def find_matching_rows(html: str, substring: str = TARGET_SUBSTRING) -> list[dict[str, str]]:
+    """
+    Przeszukuje wiersze tabel w sekcji zastępstw i zwraca wiersze,
+    w których występuje podany ciąg znaków (np. '2m').
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    body = soup.find("div", class_="com-content-article__body")
+    source_node = body if body is not None else soup
+
+    default_headers = ["Lekcja", "Nauczyciel", "Oddział", "Przedmiot", "Sala", "Zastępca"]
+    needle = substring.lower()
+    matches: list[dict[str, str]] = []
+
+    for table in source_node.find_all("table"):
+        headers = list(default_headers)
+        header_row = table.find("tr")
+        if header_row:
+            th_cells = [_clean_cell(th.get_text(" ", strip=True)) for th in header_row.find_all("th")]
+            if len(th_cells) >= 2:
+                headers = th_cells
+
+        for tr in table.find_all("tr"):
+            cells_raw = tr.find_all(["td", "th"])
+            if not cells_raw:
+                continue
+            # Pomijamy wiersze nagłówkowe złożone wyłącznie z <th>
+            if all(c.name == "th" for c in cells_raw):
+                continue
+
+            cells = [_clean_cell(c.get_text(" ", strip=True)) for c in cells_raw]
+            row_joined_lower = " ".join(cells).lower()
+
+            if needle in row_joined_lower:
+                row_dict: dict[str, str] = {}
+                for idx, val in enumerate(cells):
+                    col_name = headers[idx] if idx < len(headers) else f"Kolumna {idx + 1}"
+                    row_dict[col_name] = val
+                matches.append(row_dict)
+
+    return matches
+
+
+def format_matched_rows(rows: list[dict[str, str]], substring: str = TARGET_SUBSTRING) -> str:
+    """Formatuje dopasowane wiersze w czytelny blok tekstowy dla Discorda."""
+    if not rows:
+        return ""
+
+    blocks = [f"🎯 **Dopasowania dla `{substring}` ({len(rows)}):**"]
+    for idx, row in enumerate(rows, start=1):
+        lines = [f"**Wiersz #{idx}:**"]
+        for field_name, field_val in row.items():
+            lines.append(f"{field_name}: {field_val}")
+        blocks.append("\n".join(lines))
+
+    return "\n\n".join(blocks)
+
+
+def _split_discord_message(text: str, limit: int = DISCORD_MAX_LEN) -> list[str]:
+    """Dzieli długą wiadomość na części mieszczące się w limicie znaków Discorda."""
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            # Jeśli pojedynczy blok jest dłuższy niż limit, dzielimy po liniach
+            if len(block) > limit:
+                line_buf = ""
+                for line in block.split("\n"):
+                    line_cand = f"{line_buf}\n{line}" if line_buf else line
+                    if len(line_cand) <= limit:
+                        line_buf = line_cand
+                    else:
+                        if line_buf:
+                            chunks.append(line_buf)
+                        line_buf = line[:limit]
+                current = line_buf
+            else:
+                current = block
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def extract_text_section_and_hash(html: str) -> tuple[str, str]:
     """
     Wyciąga treść artykułu zastępstw i oblicza znormalizowany hash SHA-256,
@@ -176,12 +276,14 @@ def find_lessons_1_to_8(html: str, normalized_text: str) -> list[str]:
     return found
 
 
-async def send_discord_alert(image_urls, images_bytes_list, date_text):
+async def send_discord_alert(image_urls, images_bytes_list, date_text, extra_text: str = ""):
     if not WEBHOOK_URL:
         print("[!] Brak skonfigurowanego DISCORD_WEBHOOK_URL_2.")
         return
 
-    content = f"📢 **NOWE ZASTĘPSTWA!** ({date_text})\n"
+    header = f"📢 **NOWE ZASTĘPSTWA!** ({date_text})"
+    full_content = f"{header}\n\n{extra_text}".strip() if extra_text else f"{header}\n"
+    chunks = _split_discord_message(full_content)
 
     files = {}
     for idx, (url, img_bytes) in enumerate(zip(image_urls, images_bytes_list)):
@@ -190,10 +292,11 @@ async def send_discord_alert(image_urls, images_bytes_list, date_text):
 
     async with httpx.AsyncClient() as client:
         try:
-            if files:
-                await client.post(WEBHOOK_URL, data={"content": content}, files=files, timeout=30.0)
-            else:
-                await client.post(WEBHOOK_URL, json={"content": content}, timeout=10.0)
+            for chunk_idx, chunk in enumerate(chunks):
+                if chunk_idx == 0 and files:
+                    await client.post(WEBHOOK_URL, data={"content": chunk}, files=files, timeout=30.0)
+                else:
+                    await client.post(WEBHOOK_URL, json={"content": chunk}, timeout=10.0)
             print("[+] Pomyślnie wysłano powiadomienie na Discorda.")
         except Exception as e:
             print(f"[!] Błąd wysyłania na Discorda: {e}")
@@ -221,6 +324,10 @@ async def check_zastepstwa():
         date_text = get_target_date_text()
         saved_state = await get_saved_state()
         print(f"[DEBUG] Wyznaczona data: '{date_text}' | saved_state: {saved_state}")
+
+        matched_rows = find_matching_rows(html, TARGET_SUBSTRING)
+        extra_text = format_matched_rows(matched_rows, TARGET_SUBSTRING)
+        print(f"[DEBUG] Dopasowane wiersze z '{TARGET_SUBSTRING}' ({len(matched_rows)}): {matched_rows}")
 
         # 1. Najpierw szukamy obrazków tak jak wcześniej
         image_matches = re.findall(r'src=["\'](/images/[^"\']+\.png)["\']', html)
@@ -262,11 +369,11 @@ async def check_zastepstwa():
             if saved_state is None:
                 print(f"[*] Pierwsze uruchomienie. Zapisywanie stanu dla {len(full_image_urls)} obrazków.")
                 await save_state(full_image_urls, current_combined_hash)
-                await send_discord_alert(full_image_urls, images_bytes_list, date_text)
+                await send_discord_alert(full_image_urls, images_bytes_list, date_text, extra_text=extra_text)
             elif saved_state["images_urls"] != current_urls_str or saved_state["images_hash"] != current_combined_hash:
                 print("[!] ZMIANA ZASTĘPSTW WYKRYTA! Zmieniono adresy URL lub zawartość któregoś z obrazków.")
                 await save_state(full_image_urls, current_combined_hash)
-                await send_discord_alert(full_image_urls, images_bytes_list, date_text)
+                await send_discord_alert(full_image_urls, images_bytes_list, date_text, extra_text=extra_text)
             else:
                 print("[*] Brak zmian w zastępstwach (wszystkie obrazki i ich hasze są identyczne jak w bazie).")
             return
@@ -288,7 +395,7 @@ async def check_zastepstwa():
             await save_state([], "", text_hash=current_text_hash)
             if lessons:
                 print(f"[!] Wykryto wpisy lekcji 1-8 przy pierwszym uruchomieniu: {lessons}")
-                await send_discord_alert([], [], date_text)
+                await send_discord_alert([], [], date_text, extra_text=extra_text)
             else:
                 print("[*] Brak wpisów lekcji 1-8 na stronie.")
             return
@@ -299,7 +406,7 @@ async def check_zastepstwa():
 
             if lessons:
                 print(f"[!] Znaleziono lekcje 1-8: {lessons}. Wysyłam komunikat bez załącznika.")
-                await send_discord_alert([], [], date_text)
+                await send_discord_alert([], [], date_text, extra_text=extra_text)
             else:
                 print("[*] Podstrona została zaktualizowana, ale nie znaleziono wpisów lekcji 1-8.")
         else:
