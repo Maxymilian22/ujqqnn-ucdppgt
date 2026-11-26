@@ -9,6 +9,7 @@ import random
 import subprocess
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 # --- KONFIGURACJA ---
 DAEMON_MODE = True  # Tryb pętli na czas działania GitHub Actions
