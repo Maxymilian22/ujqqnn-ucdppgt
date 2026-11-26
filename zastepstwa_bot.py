@@ -99,8 +99,8 @@ def commit_db_to_github():
         else:
             print("[*] Brak nowych zmian w bazie danych do wysłania.")
     except Exception as e:
-    print(f"[!] Błąd połączenia ze stroną ({type(e).__name__}): {e!r}")
-    return
+        print(f"[!] Błąd połączenia ze stroną ({type(e).__name__}): {e!r}")
+        return
 
 
 async def init_db():
